@@ -17,66 +17,83 @@ export default function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
 
-  // Load leads with local persistence so user edits are retained across reloads
-  const [leads, setLeads] = useState<Lead[]>(() => {
-    const saved = localStorage.getItem('rlight_leads_db_v2');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (err) {
-        console.error('Error parsing saved leads: ', err);
-      }
-    }
-    return getInitialLeads();
-  });
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Save changes to localStorage automatically
+  // Fetch leads from Cloudflare D1 via Vercel API
   useEffect(() => {
-    localStorage.setItem('rlight_leads_db_v2', JSON.stringify(leads));
-  }, [leads]);
+    fetch('/api/leads')
+      .then((res) => {
+        if (!res.ok) throw new Error('Error al cargar leads desde el servidor');
+        return res.json();
+      })
+      .then((data) => {
+        setLeads(data.leads || []);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error(err);
+        setError(err.message);
+        setLoading(false);
+      });
+  }, []);
 
   // Handle lead select
   const handleSelectLead = (lead: Lead) => {
-    // Make sure we select the freshest version from the actual live state list
     const freshLead = leads.find((l) => l.id === lead.id) || lead;
     setSelectedLead(freshLead);
   };
 
   // State evolution updating
   const handleUpdateLeadStatus = (leadId: string, newStatus: LeadState) => {
+    const date = new Date();
+    const timestamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    
+    const newInteraction = {
+      type: 'status_change' as const,
+      summary: `Fase de análisis modificada`,
+      details: `La etapa avanzó a "${newStatus}".`,
+      agentName: 'Consola Automática'
+    };
+
+    // Optimistic UI update
     setLeads((prevLeads) =>
       prevLeads.map((lead) => {
         if (lead.id === leadId) {
-          const prevStatusLabel = lead.estado;
-          const stageLabel = newStatus;
-          
-          // Inject an interaction log tracking this change
-          const date = new Date();
-          const timestamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-          
-          const newInteraction: InteractionLog = {
-            id: `sys-status-${Date.now()}`,
-            type: 'status_change',
-            summary: `Fase de análisis modificada`,
-            details: `La etapa avanzó de "${prevStatusLabel}" a "${stageLabel}".`,
-            date: timestamp,
-            agentName: 'Consola Automática'
-          };
-
           return {
             ...lead,
             estado: newStatus,
             lastContactDate: timestamp,
-            interactions: [...lead.interactions, newInteraction]
+            interactions: [
+              ...lead.interactions,
+              {
+                id: `sys-status-${Date.now()}`,
+                ...newInteraction,
+                date: timestamp
+              }
+            ]
           };
         }
         return lead;
       })
     );
+
+    // Persist to D1
+    fetch(`/api/leads/${leadId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        estado: newStatus,
+        lastContactDate: timestamp,
+        interaction: newInteraction
+      })
+    }).catch(err => console.error('Error updating status in DB:', err));
   };
 
   // Changing proposed water volume or budget
   const handleUpdateLeadCaudalAndValue = (leadId: string, m3: number, value: number) => {
+    // Optimistic UI update
     setLeads((prevLeads) =>
       prevLeads.map((lead) => {
         if (lead.id === leadId) {
@@ -89,6 +106,16 @@ export default function App() {
         return lead;
       })
     );
+
+    // Persist to D1
+    fetch(`/api/leads/${leadId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        m3Proposed: m3,
+        contractValue: value
+      })
+    }).catch(err => console.error('Error updating values in DB:', err));
   };
 
   // Adding manual comments or call registrations
@@ -102,6 +129,7 @@ export default function App() {
       date: timestamp
     };
 
+    // Optimistic UI update
     setLeads((prevLeads) =>
       prevLeads.map((lead) => {
         if (lead.id === leadId) {
@@ -114,29 +142,53 @@ export default function App() {
         return lead;
       })
     );
+
+    // Persist to D1
+    fetch(`/api/leads/${leadId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lastContactDate: timestamp,
+        interaction
+      })
+    }).catch(err => console.error('Error adding interaction to DB:', err));
   };
 
   // Bulk or single importing
-  const handleImportLeads = (newLeads: Omit<Lead, 'id' | 'interactions'>[]) => {
-    const formattedLeads: Lead[] = newLeads.map((lead, idx) => {
-      const timestamp = '2026-06-05 15:00';
-      return {
-        ...lead,
-        id: `imported-lead-${Date.now()}-${idx}`,
-        interactions: [
-          {
-            id: `sys-import-${Date.now()}-${idx}`,
-            type: 'system',
-            summary: 'Municipio Importado Estructuralmente',
-            details: 'Se dio de alta el contacto municipal con dolores y oportunidades hídricas asociadas.',
-            date: timestamp,
-            agentName: 'Sistema'
-          }
-        ]
-      };
-    });
+  const handleImportLeads = async (newLeads: Omit<Lead, 'id' | 'interactions'>[]) => {
+    const timestamp = '2026-06-05 15:00';
+    const formattedLeads: Lead[] = newLeads.map((lead, idx) => ({
+      ...lead,
+      id: `imported-lead-${Date.now()}-${idx}`,
+      interactions: [
+        {
+          id: `sys-import-${Date.now()}-${idx}`,
+          type: 'system',
+          summary: 'Municipio Importado Estructuralmente',
+          details: 'Se dio de alta el contacto municipal con dolores y oportunidades hídricas asociadas.',
+          date: timestamp,
+          agentName: 'Sistema'
+        }
+      ]
+    }));
 
+    // Optimistic UI update
     setLeads((prev) => [...prev, ...formattedLeads]);
+
+    // Persist to D1 (Parallel requests)
+    try {
+      await Promise.all(
+        formattedLeads.map((lead) =>
+          fetch('/api/leads', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(lead),
+          })
+        )
+      );
+    } catch (err) {
+      console.error('Error saving imported leads to DB:', err);
+    }
   };
 
   return (
@@ -191,13 +243,33 @@ export default function App() {
         </div>
 
         <main className="flex-1 w-full p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
-        
-        {/* TAB 1: DASHBOARD & REALTIME ANALYTICS */}
-        {currentTab === 'dashboard' && (
-          <div className="space-y-6 animate-fade-in animate-duration-150">
-            
-            {/* Quick Introduction Bar */}
-            <div className="bg-white dark:bg-[#121E36] p-6 border border-gray-200 dark:border-slate-800">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-20 space-y-4">
+              <div className="w-12 h-12 border-4 border-ril-blue border-t-transparent rounded-full animate-spin"></div>
+              <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+                Cargando leads desde Cloudflare D1...
+              </p>
+            </div>
+          ) : error ? (
+            <div className="p-6 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900 rounded-lg text-center space-y-3">
+              <AlertCircle className="w-10 h-10 text-red-500 mx-auto" />
+              <h3 className="font-bold text-red-800 dark:text-red-300">Error de Conexión</h3>
+              <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+              <button 
+                onClick={() => window.location.reload()} 
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all"
+              >
+                Reintentar
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* TAB 1: DASHBOARD & REALTIME ANALYTICS */}
+              {currentTab === 'dashboard' && (
+                <div className="space-y-6 animate-fade-in animate-duration-150">
+                  
+                  {/* Quick Introduction Bar */}
+                  <div className="bg-white dark:bg-[#121E36] p-6 border border-gray-200 dark:border-slate-800">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="space-y-1">
                   <span className="text-[10px] bg-ril-lightblue text-ril-darkblue dark:bg-blue-900 dark:text-blue-105 font-bold px-2.5 py-1 uppercase tracking-widest inline-block">
@@ -330,8 +402,9 @@ export default function App() {
             onUpdateLeadStatus={handleUpdateLeadStatus} 
           />
         )}
-
-      </main>
+            </>
+          )}
+        </main>
 
       {/* FOOTER */}
       <footer className="mt-12 bg-ril-black text-white px-6 py-8 border-t border-white/10 font-sans text-xs">
