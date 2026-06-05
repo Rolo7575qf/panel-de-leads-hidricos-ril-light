@@ -1,0 +1,6 @@
+{
+  "name": "Panel de Leads Hídricos - RIL-LIGHT",
+  "description": "Plataforma comercial y panel de control de leads, gestión de pipeline B.O.T y herramientas automáticas de seguimiento mediante IA para el Consorcio RIL-LIGHT S.A.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
